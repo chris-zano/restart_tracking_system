@@ -1,0 +1,25 @@
+# Version control
+.git
+.gitignore
+
+# Deps (reinstalled in image)
+node_modules
+
+# Development / test files
+index.ts
+debug-targets.ts
+test-*.ts
+summary*.ts
+
+# Docs
+docs
+README.md
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.log
+
+# Docker files themselves
+Dockerfile
+.dockerignore

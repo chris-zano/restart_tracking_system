@@ -1,0 +1,61 @@
+# Configuration files with credentials
+config/email_config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Reports and outputs
+reports/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+node_modules/
+dist/
+
+# Keep CSV data folders, ignore their contents
+attendance_reports/*
+!attendance_reports/.gitkeep
+
+class_list/*
+!class_list/.gitkeep
+
+weekly_targets/*
+!weekly_targets/.gitkeep
+
+exports/*
+!exports/.gitkeep
+
+learner_progess_reports/*
+!learner_progess_reports/.gitkeep
