@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS tenants (
+    id          BIGSERIAL PRIMARY KEY,
+    schema_name VARCHAR(100) NOT NULL UNIQUE,
+    instructor_name VARCHAR(255) NOT NULL,
+    active      BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMP NOT NULL DEFAULT NOW()
+);

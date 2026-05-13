@@ -1,0 +1,1438 @@
+openapi: 3.0.3
+
+info:
+  title: Restart API
+  version: 1.0.0
+  description: |
+    ## Overview
+    Restart is a multi-tenant SaaS platform for managing instructor-led training programmes.
+    Each instructor (tenant) operates in an isolated PostgreSQL schema — their data is
+    completely separate from every other tenant.
+
+    ## Two Scopes
+    The API has two distinct actor scopes:
+
+    - **ADMIN** — Internal staff. Data lives in the `public` schema. Manages tenant creation,
+      instructor provisioning, tracks, weekly targets, and has read access across all tenants.
+    - **INSTRUCTOR** — One per tenant. Data lives in the tenant's own schema. Manages their
+      own cohorts, learners, and attendance records.
+
+    ## Authentication
+    All protected endpoints require a `Bearer` JWT in the `Authorization` header.
+
+    - Admin tokens are obtained from `POST /api/auth/admin/login`.
+    - Instructor tokens are obtained from `POST /api/auth/login` with an `X-Tenant-ID` header
+      identifying which tenant schema to authenticate against.
+
+    ### Why X-Tenant-ID on login?
+    PostgreSQL schema-per-tenant means "john" in `tenant_a` and "john" in `tenant_b` are
+    completely different users. The `X-Tenant-ID` header tells the backend which schema to
+    search in during authentication. After login, the tenant is embedded in the JWT itself,
+    so subsequent requests do **not** need `X-Tenant-ID` — the token carries it.
+
+    ## Standard Response Envelope
+    Every response is wrapped in:
+    ```json
+    {
+      "success": true,
+      "message": "...",
+      "data": { ... }
+    }
+    ```
+    Errors follow the same shape with `"success": false` and a descriptive `"message"`.
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://api.restart.csniico.com
+    description: Production
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Auth
+    description: |
+      Token acquisition endpoints. These are public — no JWT required.
+      Tokens expire after 24 hours (configurable via `app.jwt.expiration-ms`).
+  - name: Tenants
+    description: |
+      Admin-only. Create and list instructor tenants. Each tenant maps 1:1 to a
+      PostgreSQL schema. Creating a tenant runs Flyway migrations on the new schema
+      automatically — the instructor's schema is immediately ready for use.
+  - name: Admin › Instructors
+    description: |
+      Admin-only. Provision user accounts within a tenant schema. An instructor cannot
+      log in until their account is created here. Multiple instructor accounts can exist
+      in one tenant (e.g. co-instructors).
+  - name: Admin › Learners
+    description: |
+      Admin-only. Full CRUD on learners for any tenant. Mirrors the instructor endpoints
+      but requires a `schemaName` path variable so the admin can act on behalf of any tenant.
+      Learners include: fullname, email, phone, gender, location, region, institution,
+      graduation status, and optional cohort assignment.
+  - name: Admin › Attendance
+    description: |
+      Admin-only, **read-only**. Admins can view attendance records across tenants but
+      cannot create or modify them — attendance data is owned by the instructor.
+  - name: Admin › Weekly Targets
+    description: |
+      Admin-only. Manage the curriculum content calendar. Weekly targets belong to a
+      Track. Instructor cohorts reference a `trackId`, linking them to the correct
+      weekly targets without copying data into each tenant schema.
+  - name: Admin › Audit Logs
+    description: |
+      Admin-only. Query the immutable audit trail. Every API call is logged — who did
+      what, when, from where, and to which tenant. Filterable by actor, tenant, resource
+      type, and action.
+  - name: Instructor › Cohorts
+    description: |
+      Instructor-only. A cohort is a group of learners following the same programme.
+      Cohorts carry a `trackId` linking them to the weekly targets schedule.
+  - name: Instructor › Learners
+    description: |
+      Instructor-only. Manage learners within the instructor's own schema. Supports
+      single creation and bulk CSV-parsed upload. Each learner record includes personal
+      and demographic information: name, email, phone (validated as 10-digit Ghanaian
+      format `0[2-5]XXXXXXXX`), gender, location, region, institution, and graduation status.
+  - name: Instructor › Attendance
+    description: |
+      Instructor-only. Record session attendance. Each record ties to a cohort and
+      contains a participants array with per-learner duration. All `learnerId` values
+      are validated against the learners table before saving.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── AUTH ─────────────────────────────────────────────────────────────────
+
+  /api/auth/admin/login:
+    post:
+      tags: [Auth]
+      summary: Admin login
+      description: |
+        Authenticates an admin user against the `public.admin_users` table.
+        Returns a JWT with `role: ADMIN` and no `tenantId` claim.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              username: admin
+              password: secret123
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseLoginResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Instructor login
+      description: |
+        Authenticates an instructor against the schema identified by `X-Tenant-ID`.
+        Returns a JWT with `role: INSTRUCTOR` and a `tenantId` claim equal to the
+        schema name. The frontend must store this token and send it on every subsequent
+        instructor request — the `X-Tenant-ID` header is **not** needed after login.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/XTenantID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              username: john_instructor
+              password: myPassword
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseLoginResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── TENANTS ──────────────────────────────────────────────────────────────
+
+  /api/tenants:
+    post:
+      tags: [Tenants]
+      summary: Create a new tenant
+      description: |
+        Creates a PostgreSQL schema for the instructor, runs the tenant Flyway migrations
+        (`users`, `cohorts`, `learners`, `attendance` tables), and registers the tenant in
+        `public.tenants`. The `schemaName` is auto-derived from `instructorName` by
+        lowercasing and replacing non-alphanumeric characters with underscores.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantRequest'
+            example:
+              instructorName: Kwame Mensah
+      responses:
+        '201':
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseTenantResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    get:
+      tags: [Tenants]
+      summary: List all tenants
+      responses:
+        '200':
+          description: List of tenants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseTenantList'
+
+  /api/tenants/{schemaName}:
+    get:
+      tags: [Tenants]
+      summary: Get a single tenant
+      parameters:
+        - $ref: '#/components/parameters/SchemaNamePath'
+      responses:
+        '200':
+          description: Tenant found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseTenantResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── ADMIN › INSTRUCTORS ───────────────────────────────────────────────────
+
+  /api/admin/instructors:
+    post:
+      tags: [Admin › Instructors]
+      summary: Provision an instructor account
+      description: |
+        Creates a user record in the tenant's `users` table (not the public schema).
+        The instructor can then log in via `POST /api/auth/login` with `X-Tenant-ID`.
+        Multiple instructor accounts can exist per tenant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstructorProvisionRequest'
+            example:
+              schemaName: kwame_mensah
+              username: kwame
+              password: securePass123
+      responses:
+        '201':
+          description: Instructor provisioned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseInstructorResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/instructors/{schemaName}:
+    get:
+      tags: [Admin › Instructors]
+      summary: List instructor accounts in a tenant
+      parameters:
+        - $ref: '#/components/parameters/SchemaNamePath'
+      responses:
+        '200':
+          description: List of instructors
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseInstructorList'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/instructors/{schemaName}/{username}:
+    delete:
+      tags: [Admin › Instructors]
+      summary: Remove an instructor account
+      parameters:
+        - $ref: '#/components/parameters/SchemaNamePath'
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── ADMIN › LEARNERS ──────────────────────────────────────────────────────
+
+  /api/admin/tenants/{schemaName}/learners:
+    post:
+      tags: [Admin › Learners]
+      summary: Create a learner in a tenant
+      parameters:
+        - $ref: '#/components/parameters/SchemaNamePath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LearnerRequest'
+      responses:
+        '201':
+          description: Learner created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseLearnerResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    get:
+      tags: [Admin › Learners]
+      summary: List all learners in a tenant
+      parameters:
+        - $ref: '#/components/parameters/SchemaNamePath'
+      responses:
+        '200':
+          description: Learner list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseLearnerList'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/tenants/{schemaName}/learners/bulk:
+    post:
+      tags: [Admin › Learners]
+      summary: Bulk create learners in a tenant
+      description: |
+        Accepts an array of learner objects. Intended for CSV import flows where the
+        client parses the CSV and sends the parsed array as JSON. All records are
+        inserted in a single `saveAll` call within one transaction — if any record
+        fails validation, none are saved.
+      parameters:
+        - $ref: '#/components/parameters/SchemaNamePath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/LearnerRequest'
+      responses:
+        '201':
+          description: Learners created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseLearnerList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/admin/tenants/{schemaName}/learners/{id}:
+    get:
+      tags: [Admin › Learners]
+      summary: Get a learner by ID
+      parameters:
+        - $ref: '#/components/parameters/SchemaNamePath'
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: Learner found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseLearnerResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Admin › Learners]
+      summary: Update a learner
+      parameters:
+        - $ref: '#/components/parameters/SchemaNamePath'
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LearnerRequest'
+      responses:
+        '200':
+          description: Learner updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseLearnerResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Admin › Learners]
+      summary: Delete a learner
+      parameters:
+        - $ref: '#/components/parameters/SchemaNamePath'
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── ADMIN › ATTENDANCE ───────────────────────────────────────────────────
+
+  /api/admin/tenants/{schemaName}/attendance:
+    get:
+      tags: [Admin › Attendance]
+      summary: List all attendance records for a tenant
+      parameters:
+        - $ref: '#/components/parameters/SchemaNamePath'
+      responses:
+        '200':
+          description: Attendance list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseAttendanceList'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/tenants/{schemaName}/attendance/cohort/{cohortId}:
+    get:
+      tags: [Admin › Attendance]
+      summary: Filter attendance by cohort
+      parameters:
+        - $ref: '#/components/parameters/SchemaNamePath'
+        - name: cohortId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Filtered attendance list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseAttendanceList'
+
+  /api/admin/tenants/{schemaName}/attendance/{id}:
+    get:
+      tags: [Admin › Attendance]
+      summary: Get a single attendance record
+      parameters:
+        - $ref: '#/components/parameters/SchemaNamePath'
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: Attendance record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseAttendanceResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── ADMIN › WEEKLY TARGETS ───────────────────────────────────────────────
+
+  /api/admin/weekly-targets:
+    post:
+      tags: [Admin › Weekly Targets]
+      summary: Create a weekly target
+      description: |
+        Associates a week number (WEEK_1 through WEEK_10) with a list of lab tasks and
+        knowledge checks for a given track. The combination of `(trackId, weekNumber)`
+        must be unique. Instructor cohorts reference a `trackId` to pull the right schedule.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WeeklyTargetRequest'
+      responses:
+        '201':
+          description: Weekly target created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseWeeklyTargetResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/admin/weekly-targets/{id}:
+    get:
+      tags: [Admin › Weekly Targets]
+      summary: Get a weekly target by ID
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: Weekly target
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseWeeklyTargetResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Admin › Weekly Targets]
+      summary: Update a weekly target
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WeeklyTargetRequest'
+      responses:
+        '200':
+          description: Updated weekly target
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseWeeklyTargetResponse'
+    delete:
+      tags: [Admin › Weekly Targets]
+      summary: Delete a weekly target
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+
+  /api/admin/weekly-targets/track/{trackId}:
+    get:
+      tags: [Admin › Weekly Targets]
+      summary: Get all weekly targets for a track
+      parameters:
+        - name: trackId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Weekly targets for the track
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseWeeklyTargetList'
+
+  /api/admin/weekly-targets/track/{trackId}/week/{weekNumber}:
+    get:
+      tags: [Admin › Weekly Targets]
+      summary: Get a specific week's targets
+      parameters:
+        - name: trackId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: weekNumber
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/WeekNumber'
+      responses:
+        '200':
+          description: Weekly target for the given track and week
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseWeeklyTargetResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── ADMIN › AUDIT LOGS ───────────────────────────────────────────────────
+
+  /api/admin/audit-logs:
+    get:
+      tags: [Admin › Audit Logs]
+      summary: Query the audit trail
+      description: |
+        Returns a paginated list of audit log entries. Apply at most **one** filter at a time
+        (precedence: `actorUsername` → `tenantId` → `resourceType` → `action`). Results are
+        always sorted newest-first.
+
+        Every endpoint call is logged regardless of whether it has a specific `@Auditable`
+        action — the HTTP method, path, and status are always captured. Endpoints annotated
+        with `@Auditable` additionally carry `action`, `resourceType`, `resourceId`, and
+        `tenantId`.
+      parameters:
+        - name: actorUsername
+          in: query
+          schema:
+            type: string
+          description: Filter by the username of the actor who made the request
+        - name: tenantId
+          in: query
+          schema:
+            type: string
+          description: Filter by tenant schema name (e.g. `kwame_mensah`)
+        - name: resourceType
+          in: query
+          schema:
+            type: string
+            enum: [LEARNER, COHORT, ATTENDANCE, INSTRUCTOR, WEEKLY_TARGET, TENANT]
+        - name: action
+          in: query
+          schema:
+            type: string
+          description: Exact action string (e.g. `CREATE_LEARNER`, `DELETE_COHORT`)
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: size
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Paginated audit log
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseAuditLogPage'
+
+  # ── INSTRUCTOR › COHORTS ─────────────────────────────────────────────────
+
+  /api/instructor/cohorts:
+    post:
+      tags: [Instructor › Cohorts]
+      summary: Create a cohort
+      description: |
+        Creates a cohort within the instructor's schema. The `trackId` links the cohort
+        to a curriculum track defined by the admin, enabling the frontend to show the
+        correct weekly targets for that cohort's current week.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CohortRequest'
+      responses:
+        '201':
+          description: Cohort created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseCohortResponse'
+    get:
+      tags: [Instructor › Cohorts]
+      summary: List all cohorts
+      responses:
+        '200':
+          description: Cohort list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseCohortList'
+
+  /api/instructor/cohorts/{id}:
+    get:
+      tags: [Instructor › Cohorts]
+      summary: Get a cohort by ID
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: Cohort found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseCohortResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Instructor › Cohorts]
+      summary: Update a cohort
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CohortRequest'
+      responses:
+        '200':
+          description: Cohort updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseCohortResponse'
+    delete:
+      tags: [Instructor › Cohorts]
+      summary: Delete a cohort
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+
+  # ── INSTRUCTOR › LEARNERS ────────────────────────────────────────────────
+
+  /api/instructor/learners:
+    post:
+      tags: [Instructor › Learners]
+      summary: Add a single learner
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LearnerRequest'
+      responses:
+        '201':
+          description: Learner created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseLearnerResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    get:
+      tags: [Instructor › Learners]
+      summary: List all learners
+      responses:
+        '200':
+          description: Learner list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseLearnerList'
+
+  /api/instructor/learners/bulk:
+    post:
+      tags: [Instructor › Learners]
+      summary: Bulk add learners
+      description: |
+        The client should parse the CSV on the frontend and post the resulting array.
+        All rows are inserted atomically — a single invalid row rolls back everything.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/LearnerRequest'
+      responses:
+        '201':
+          description: Learners created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseLearnerList'
+
+  /api/instructor/learners/{id}:
+    get:
+      tags: [Instructor › Learners]
+      summary: Get a learner by ID
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: Learner found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseLearnerResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Instructor › Learners]
+      summary: Update a learner
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LearnerRequest'
+      responses:
+        '200':
+          description: Learner updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseLearnerResponse'
+    delete:
+      tags: [Instructor › Learners]
+      summary: Delete a learner
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+
+  # ── INSTRUCTOR › ATTENDANCE ──────────────────────────────────────────────
+
+  /api/instructor/attendance:
+    post:
+      tags: [Instructor › Attendance]
+      summary: Record a session
+      description: |
+        Creates an attendance record for a session. The `participants` array must contain
+        only `learnerId` values that exist in the same tenant's `learners` table — the
+        backend validates every ID before saving. The per-participant `duration` captures
+        how long each learner was present (may differ from the session `duration` if they
+        arrived late or left early).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttendanceRequest'
+            example:
+              cohortId: 1
+              sessionDate: "2026-05-02"
+              duration: 120
+              participants:
+                - learnerId: 1
+                  duration: 120
+                - learnerId: 2
+                  duration: 90
+      responses:
+        '201':
+          description: Attendance recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseAttendanceResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    get:
+      tags: [Instructor › Attendance]
+      summary: List all attendance records
+      responses:
+        '200':
+          description: Attendance list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseAttendanceList'
+
+  /api/instructor/attendance/cohort/{cohortId}:
+    get:
+      tags: [Instructor › Attendance]
+      summary: Filter attendance by cohort
+      parameters:
+        - name: cohortId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Filtered attendance list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseAttendanceList'
+
+  /api/instructor/attendance/{id}:
+    get:
+      tags: [Instructor › Attendance]
+      summary: Get a single attendance record
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: Attendance record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseAttendanceResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Instructor › Attendance]
+      summary: Update an attendance record
+      description: Re-validates all participant learner IDs on every update.
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttendanceRequest'
+      responses:
+        '200':
+          description: Attendance updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseAttendanceResponse'
+    delete:
+      tags: [Instructor › Attendance]
+      summary: Delete an attendance record
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPONENTS
+# ─────────────────────────────────────────────────────────────────────────────
+components:
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT issued by `/api/auth/admin/login` or `/api/auth/login`.
+        Claims: `sub` (username), `role` (ADMIN | INSTRUCTOR), `tenantId` (schema name, null for admin).
+        Expiry: 24 hours.
+
+  parameters:
+    SchemaNamePath:
+      name: schemaName
+      in: path
+      required: true
+      description: |
+        The PostgreSQL schema name for the tenant (e.g. `kwame_mensah`).
+        Derived from the instructor's name via `SchemaUtil.toSchemaName()`:
+        lowercase, non-alphanumeric chars → underscore, collapse multiple underscores.
+      schema:
+        type: string
+        example: kwame_mensah
+
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+
+    XTenantID:
+      name: X-Tenant-ID
+      in: header
+      required: true
+      description: |
+        The tenant schema name. Required **only** on `POST /api/auth/login`.
+        All other instructor requests derive the tenant from the JWT `tenantId` claim.
+      schema:
+        type: string
+        example: kwame_mensah
+
+  # ── REQUEST BODIES ───────────────────────────────────────────────────────
+
+  schemas:
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          example: admin
+        password:
+          type: string
+          format: password
+          example: secret123
+
+    TenantRequest:
+      type: object
+      required: [instructorName]
+      properties:
+        instructorName:
+          type: string
+          description: Human-readable instructor name. The schema name is derived from this.
+          example: Kwame Mensah
+
+    InstructorProvisionRequest:
+      type: object
+      required: [schemaName, username, password]
+      properties:
+        schemaName:
+          type: string
+          example: kwame_mensah
+        username:
+          type: string
+          example: kwame
+        password:
+          type: string
+          format: password
+          minLength: 8
+          example: securePass123
+
+    CohortRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          example: Cohort A — May 2026
+        description:
+          type: string
+          example: First cohort of the year
+        trackId:
+          type: integer
+          format: int64
+          description: |
+            Links this cohort to a curriculum track defined by the admin.
+            The frontend can use this to fetch the cohort's weekly targets schedule.
+          example: 1
+
+    LearnerRequest:
+      type: object
+      required: [fullname, email, phone]
+      properties:
+        fullname:
+          type: string
+          example: Kofi Mensah
+        email:
+          type: string
+          format: email
+          example: kofi.mensah@university.edu.gh
+        phone:
+          type: string
+          pattern: '^0[2-5]\d{8}$'
+          description: 10-digit Ghanaian mobile number starting with 02–05.
+          example: "0241234567"
+        gender:
+          type: string
+          nullable: true
+          example: Male
+        location:
+          type: string
+          nullable: true
+          example: Accra
+        region:
+          type: string
+          nullable: true
+          example: Greater Accra
+        institution:
+          type: string
+          nullable: true
+          description: Educational institution or organization.
+          example: University of Ghana
+        graduated:
+          type: boolean
+          default: false
+        cohortId:
+          type: integer
+          format: int64
+          description: Optional cohort assignment.
+          example: 1
+
+    AttendanceRequest:
+      type: object
+      required: [cohortId, sessionDate, duration, participants]
+      properties:
+        cohortId:
+          type: integer
+          format: int64
+          example: 1
+        sessionDate:
+          type: string
+          format: date
+          example: "2026-05-02"
+        duration:
+          type: integer
+          description: Total session duration in minutes.
+          minimum: 1
+          example: 120
+        participants:
+          type: array
+          minItems: 1
+          description: |
+            Each entry records one learner's presence. The `learnerId` must exist
+            in the tenant's `learners` table — the API validates all IDs before saving.
+            Per-participant `duration` captures how long that learner was actually present.
+          items:
+            $ref: '#/components/schemas/ParticipantEntry'
+
+    ParticipantEntry:
+      type: object
+      required: [learnerId, duration]
+      properties:
+        learnerId:
+          type: integer
+          format: int64
+          example: 42
+        duration:
+          type: integer
+          description: Minutes the learner was present in this session.
+          minimum: 1
+          example: 90
+
+    WeeklyTargetRequest:
+      type: object
+      required: [trackId, weekNumber, labs, knowledgeChecks]
+      properties:
+        trackId:
+          type: integer
+          format: int64
+          example: 1
+        weekNumber:
+          $ref: '#/components/schemas/WeekNumber'
+        labs:
+          type: array
+          items:
+            type: string
+          example: ["Lab 1: Introduction to Variables", "Lab 2: Control Flow"]
+        knowledgeChecks:
+          type: array
+          items:
+            type: string
+          example: ["What is a variable?", "Explain the difference between if and switch"]
+
+    WeekNumber:
+      type: string
+      enum:
+        - WEEK_1
+        - WEEK_2
+        - WEEK_3
+        - WEEK_4
+        - WEEK_5
+        - WEEK_6
+        - WEEK_7
+        - WEEK_8
+        - WEEK_9
+        - WEEK_10
+      description: |
+        Programme week. The combination `(trackId, weekNumber)` is UNIQUE — only one
+        weekly target record can exist per track per week.
+
+  # ── RESPONSE BODIES ──────────────────────────────────────────────────────
+
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: JWT Bearer token. Store in an httpOnly cookie on the frontend.
+          example: eyJhbGciOiJIUzI1NiJ9...
+
+    TenantResponse:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        schemaName:
+          type: string
+          description: The PostgreSQL schema name — use this as `X-Tenant-ID` for instructor login.
+          example: kwame_mensah
+        instructorName: { type: string, example: Kwame Mensah }
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    InstructorResponse:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        username: { type: string }
+        schemaName: { type: string }
+        role: { type: string, example: INSTRUCTOR }
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    CohortResponse:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        description: { type: string }
+        trackId:
+          type: integer
+          format: int64
+          nullable: true
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    LearnerResponse:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        fullname: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string }
+        gender: { type: string, nullable: true }
+        location: { type: string, nullable: true }
+        region: { type: string, nullable: true }
+        institution: { type: string, nullable: true }
+        graduated: { type: boolean }
+        cohortId: { type: integer, format: int64, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    AttendanceResponse:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        cohortId: { type: integer, format: int64 }
+        sessionDate: { type: string, format: date }
+        duration: { type: integer, description: Session duration in minutes }
+        participants:
+          type: array
+          items:
+            $ref: '#/components/schemas/ParticipantEntry'
+        createdAt: { type: string, format: date-time }
+
+    WeeklyTargetResponse:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        trackId: { type: integer, format: int64 }
+        weekNumber:
+          $ref: '#/components/schemas/WeekNumber'
+        labs:
+          type: array
+          items: { type: string }
+        knowledgeChecks:
+          type: array
+          items: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    AuditLogResponse:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        actorUsername: { type: string }
+        actorRole: { type: string, enum: [ADMIN, INSTRUCTOR] }
+        tenantId: { type: string, nullable: true, description: Schema name of the affected tenant }
+        action: { type: string, nullable: true, description: "e.g. CREATE_LEARNER, DELETE_COHORT" }
+        resourceType: { type: string, nullable: true }
+        resourceId: { type: integer, format: int64, nullable: true }
+        details: { type: string, nullable: true }
+        ipAddress: { type: string }
+        httpMethod: { type: string, example: POST }
+        endpointPath: { type: string, example: /api/instructor/learners }
+        httpStatus: { type: integer, example: 201 }
+        createdAt: { type: string, format: date-time }
+
+    ErrorResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        message: { type: string }
+        data: { nullable: true, example: null }
+
+    # ── ENVELOPE WRAPPERS ─────────────────────────────────────────────────
+
+    ApiResponseLoginResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/LoginResponse'
+
+    ApiResponseTenantResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/TenantResponse'
+
+    ApiResponseTenantList:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/TenantResponse'
+
+    ApiResponseInstructorResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/InstructorResponse'
+
+    ApiResponseInstructorList:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/InstructorResponse'
+
+    ApiResponseCohortResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/CohortResponse'
+
+    ApiResponseCohortList:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/CohortResponse'
+
+    ApiResponseLearnerResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/LearnerResponse'
+
+    ApiResponseLearnerList:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/LearnerResponse'
+
+    ApiResponseAttendanceResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/AttendanceResponse'
+
+    ApiResponseAttendanceList:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/AttendanceResponse'
+
+    ApiResponseWeeklyTargetResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/WeeklyTargetResponse'
+
+    ApiResponseWeeklyTargetList:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/WeeklyTargetResponse'
+
+    ApiResponseAuditLogPage:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              description: Spring Data Page wrapper
+              properties:
+                content:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/AuditLogResponse'
+                totalElements: { type: integer }
+                totalPages: { type: integer }
+                size: { type: integer }
+                number: { type: integer, description: Current page (0-indexed) }
+
+    ApiEnvelope:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        data: {}
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            message: Full authentication is required to access this resource
+            data: null
+
+    BadRequest:
+      description: Validation error or bad input
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            message: "phone: Phone must be a valid 10-digit Ghanaian number"
+            data: null
+
+    NotFound:
+      description: Resource or tenant not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            message: "Tenant not found: unknown_schema"
+            data: null
+
+    EmptySuccess:
+      description: Action completed, no data returned
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiEnvelope'
+          example:
+            success: true
+            message: Success
+            data: null
+

@@ -1,0 +1,68 @@
+HELP.md
+.gradle
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+bin/
+!**/src/main/**/bin/
+!**/src/test/**/bin/
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+out/
+!**/src/main/**/out/
+!**/src/test/**/out/
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+### VS Code ###
+.vscode/
+
+### Next.js (web/) ###
+web/.next/
+web/node_modules/
+web/.env.local
+web/.env.*.local
+web/out/
+
+### Environment / Secrets ###
+.env
+.env.*
+!.env.example
+web/.env
+web/.env.*
+!web/.env.example
+
+### Logs ###
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+### OS / Misc ###
+.DS_Store
+Thumbs.db
+
+### Caches / Tooling ###
+web/.turbo/
+web/.vercel/
+web/coverage/

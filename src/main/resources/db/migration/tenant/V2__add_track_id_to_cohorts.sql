@@ -1,0 +1,2 @@
+ALTER TABLE cohorts ADD COLUMN IF NOT EXISTS track_id BIGINT;
+

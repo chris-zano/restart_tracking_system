@@ -1,0 +1,19 @@
+# Build output — rebuilt inside Docker
+.next/
+out/
+
+# Dependencies — reinstalled inside Docker
+node_modules/
+
+# Local env files — injected at runtime via env vars
+.env*.local
+.env
+
+# Dev / tooling artifacts
+.git/
+.github/
+coverage/
+*.log
+Dockerfile
+.dockerignore
+README.md
