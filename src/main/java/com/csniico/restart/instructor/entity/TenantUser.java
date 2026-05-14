@@ -30,6 +30,12 @@ public class TenantUser {
     @Column(nullable = false)
     private boolean active = true;
 
+    @Column(name = "display_name")
+    private String displayName;
+
+    @Column(name = "email")
+    private String email;
+
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
 

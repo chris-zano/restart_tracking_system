@@ -26,9 +26,14 @@ public class JwtService {
     }
 
     public String generateToken(String username, String role, String tenantId) {
+        return generateToken(username, role, tenantId, false);
+    }
+
+    public String generateToken(String username, String role, String tenantId, boolean mustChangePassword) {
         JwtBuilder builder = Jwts.builder()
                 .subject(username)
                 .claim("role", role)
+                .claim("mustChangePassword", mustChangePassword)
                 .issuedAt(new Date())
                 .expiration(new Date(System.currentTimeMillis() + expirationMs))
                 .signWith(key);

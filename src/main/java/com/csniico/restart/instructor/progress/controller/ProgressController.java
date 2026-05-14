@@ -39,5 +39,12 @@ public class ProgressController {
         return ResponseEntity.ok(
                 ApiResponse.success(progressService.getSavedReport(cohortId)));
     }
+
+    @DeleteMapping("/report/cohort/{cohortId}")
+    @Auditable(action = "DELETE_PROGRESS_REPORT", resourceType = "PROGRESS")
+    public ResponseEntity<ApiResponse<Void>> deleteReport(@PathVariable Long cohortId) {
+        progressService.deleteReport(cohortId);
+        return ResponseEntity.ok(ApiResponse.success("Report cleared", null));
+    }
 }
 

@@ -11,6 +11,7 @@ import { tracksApi } from "@/lib/api/tracks";
 import { progressApi } from "@/lib/api/progress";
 import { tenantsApi } from "@/lib/api/tenants";
 import { adminInstructorsApi } from "@/lib/api/admin-instructors";
+import { profileApi } from "@/lib/api/profile";
 import { ApiError } from "@/lib/api/_client";
 import { requireInstructor, requireAdmin } from "@/lib/auth";
 import type {
@@ -152,7 +153,7 @@ export async function createTenant(instructorName: string) {
   return r;
 }
 
-export async function provisionInstructor(input: { schemaName: string; username: string; password: string }) {
+export async function provisionInstructor(input: { schemaName: string; username: string; displayName: string; email: string }) {
   await requireAdmin();
   const r = await wrap(() => adminInstructorsApi.provision(input));
   if (r.ok) revalidatePath(`/admin/tenants/${input.schemaName}`);
@@ -210,6 +211,20 @@ export async function deleteTrack(id: number) {
   return r;
 }
 
+// ─── Instructor: profile ──────────────────────────────────────────────────
+
+export async function updateProfile(tenant: string, body: { displayName: string; email: string }) {
+  await requireInstructor(tenant);
+  const r = await wrap(() => profileApi.update(body));
+  if (r.ok) revalidatePath(`/${tenant}/instructor/profile`);
+  return r;
+}
+
+export async function changePassword(tenant: string, body: { currentPassword: string; newPassword: string }) {
+  await requireInstructor(tenant);
+  return wrap(() => profileApi.changePassword(body));
+}
+
 // ─── Instructor: progress report ──────────────────────────────────────────
 
 export async function generateProgressReport(tenant: string, body: ProgressUploadRequest) {
@@ -220,4 +235,9 @@ export async function generateProgressReport(tenant: string, body: ProgressUploa
 export async function getSavedProgressReport(tenant: string, cohortId: number) {
   await requireInstructor(tenant);
   return wrap(() => progressApi.getSaved(cohortId));
+}
+
+export async function clearProgressReport(tenant: string, cohortId: number) {
+  await requireInstructor(tenant);
+  return wrap(() => progressApi.delete(cohortId));
 }

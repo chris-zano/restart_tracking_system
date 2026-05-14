@@ -5,6 +5,8 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
+import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { upsertWeeklyTarget } from "@/app/actions";
 import { WEEK_NUMBERS, type WeeklyTargetResponse, type WeekNumber, type TrackResponse } from "@/lib/types";
@@ -46,24 +48,51 @@ export function WeeklyTargetsClient({
           </Button>
         ))}
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+      <Accordion type="single" collapsible className="rounded-md border divide-y divide-border">
         {WEEK_NUMBERS.map(w => {
           const t = byWeek[w];
+          const kcCount = t?.knowledgeChecks.length ?? 0;
+          const labCount = t?.labs.length ?? 0;
           return (
-            <Card key={w} className="cursor-pointer hover:border-primary" onClick={() => setEditing(w)}>
-              <CardHeader className="pb-2"><CardTitle className="text-sm">{w.replace("_", " ")}</CardTitle></CardHeader>
-              <CardContent className="text-xs space-y-1">
-                <p>{t?.knowledgeChecks.length ?? 0} KCs</p>
-                <p>{t?.labs.length ?? 0} Labs</p>
-                {!t && <p className="text-muted-foreground">Not set</p>}
-              </CardContent>
-            </Card>
+            <AccordionItem key={w} value={w} className="border-0">
+              <AccordionTrigger className="px-4 hover:no-underline hover:bg-accent/50 rounded-none">
+                <div className="flex items-center gap-3">
+                  <span className="font-medium text-sm">{w.replace("_", " ")}</span>
+                  <Badge variant={t ? "default" : "outline"} className="text-[10px] px-1.5 py-0">
+                    {t ? `${kcCount} KC · ${labCount} Lab` : "Not set"}
+                  </Badge>
+                </div>
+              </AccordionTrigger>
+              <AccordionContent className="px-4 pb-4 space-y-4">
+                {t ? (
+                  <div className="grid md:grid-cols-2 gap-4 text-sm">
+                    <div>
+                      <p className="font-medium mb-1 text-xs uppercase tracking-wide text-muted-foreground">Knowledge checks ({kcCount})</p>
+                      <ul className="list-disc pl-4 space-y-0.5 text-muted-foreground">
+                        {t.knowledgeChecks.map(k => <li key={k}>{k}</li>)}
+                      </ul>
+                    </div>
+                    <div>
+                      <p className="font-medium mb-1 text-xs uppercase tracking-wide text-muted-foreground">Labs ({labCount})</p>
+                      <ul className="list-disc pl-4 space-y-0.5 text-muted-foreground">
+                        {t.labs.map(l => <li key={l}>{l}</li>)}
+                      </ul>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No targets set for this week yet.</p>
+                )}
+                <Button size="sm" variant="outline" onClick={() => setEditing(w)}>
+                  {t ? "Edit" : "Set targets"}
+                </Button>
+                {editing === w && (
+                  <WeekEditor key={`${trackId}-${w}`} trackId={trackId} weekNumber={w} existing={t} onSaved={handleSaved} onClose={() => setEditing(null)} />
+                )}
+              </AccordionContent>
+            </AccordionItem>
           );
         })}
-      </div>
-      {editing && (
-        <WeekEditor key={`${trackId}-${editing}`} trackId={trackId} weekNumber={editing} existing={byWeek[editing]} onSaved={handleSaved} onClose={() => setEditing(null)} />
-      )}
+      </Accordion>
     </div>
   );
 }

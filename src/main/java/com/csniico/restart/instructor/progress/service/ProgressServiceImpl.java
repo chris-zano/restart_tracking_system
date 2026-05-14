@@ -130,6 +130,14 @@ public class ProgressServiceImpl implements ProgressService {
     }
 
     @Override
+    public void deleteReport(Long cohortId) {
+        if (!reportRepository.existsById(cohortId)) {
+            throw new ResourceNotFoundException("No saved report for cohort: " + cohortId);
+        }
+        reportRepository.deleteById(cohortId);
+    }
+
+    @Override
     public ProgressReportResponseDto getSavedReport(Long cohortId) {
         GradebookReport saved = reportRepository.findById(cohortId)
                 .orElseThrow(() -> new ResourceNotFoundException("No saved report for cohort: " + cohortId));

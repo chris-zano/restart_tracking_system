@@ -10,9 +10,12 @@ import java.time.LocalDateTime;
 public class InstructorResponseDto {
     private Long id;
     private String username;
+    private String displayName;
+    private String email;
     private String schemaName;
     private String role;
     private boolean active;
     private LocalDateTime createdAt;
+    /** Only populated on initial creation — null on all other reads. */
+    private String tempPassword;
 }
-

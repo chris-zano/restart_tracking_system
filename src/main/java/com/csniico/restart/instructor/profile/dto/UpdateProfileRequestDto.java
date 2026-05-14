@@ -1,4 +1,4 @@
-package com.csniico.restart.admin.dto;
+package com.csniico.restart.instructor.profile.dto;
 
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
@@ -7,13 +7,7 @@ import lombok.Setter;
 
 @Getter
 @Setter
-public class InstructorProvisionRequestDto {
-
-    @NotBlank(message = "Schema name must not be blank")
-    private String schemaName;
-
-    @NotBlank(message = "Username must not be blank")
-    private String username;
+public class UpdateProfileRequestDto {
 
     @NotBlank(message = "Display name must not be blank")
     private String displayName;

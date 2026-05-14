@@ -28,7 +28,7 @@ export function middleware(req: NextRequest) {
   const token = req.cookies.get("restart_token")?.value;
 
   // Decode (no verify) just to check claims — backend is source of truth
-  let claims: { role?: string; tenantId?: string | null; exp?: number } | null = null;
+  let claims: { role?: string; tenantId?: string | null; exp?: number; mustChangePassword?: boolean } | null = null;
   if (token) {
     try { claims = decodeJwt(token); } catch { claims = null; }
     if (claims?.exp && claims.exp * 1000 < Date.now()) claims = null;
@@ -54,6 +54,15 @@ export function middleware(req: NextRequest) {
       url.pathname = PUBLIC_LOGIN;
       url.searchParams.set("from", pathname);
       url.searchParams.set("tenant", urlTenant);
+      return NextResponse.redirect(url);
+    }
+    // Force password change — allow only /profile and /sign-out through
+    const profilePath = `/${urlTenant}/instructor/profile`;
+    const isOnProfile = pathname === profilePath || pathname.startsWith(profilePath + "/");
+    const isSignOut = pathname.includes("/sign-out");
+    if (claims.mustChangePassword && !isOnProfile && !isSignOut) {
+      const url = req.nextUrl.clone();
+      url.pathname = profilePath;
       return NextResponse.redirect(url);
     }
     return NextResponse.next();

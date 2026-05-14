@@ -6,5 +6,6 @@ import com.csniico.restart.instructor.progress.dto.ProgressUploadRequestDto;
 public interface ProgressService {
     ProgressReportResponseDto generateReport(ProgressUploadRequestDto request);
     ProgressReportResponseDto getSavedReport(Long cohortId);
+    void deleteReport(Long cohortId);
 }
 

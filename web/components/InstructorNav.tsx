@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Layers, CalendarPlus, ListChecks, FileBarChart } from "lucide-react";
+import { LayoutDashboard, Users, Layers, CalendarPlus, ListChecks, FileBarChart, UserCircle } from "lucide-react";
 
 const NAV = [
   { segment: "",                  label: "Home",              Icon: LayoutDashboard, exact: true },
@@ -11,6 +11,7 @@ const NAV = [
   { segment: "/attendance",       label: "Take attendance",   Icon: CalendarPlus },
   { segment: "/weekly-targets",   label: "Weekly targets",    Icon: ListChecks },
   { segment: "/assignment-report", label: "Assignment report", Icon: FileBarChart },
+  { segment: "/profile",          label: "Profile",           Icon: UserCircle },
 ];
 
 export function InstructorNav({ tenant }: { tenant: string }) {

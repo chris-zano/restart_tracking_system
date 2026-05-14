@@ -10,5 +10,7 @@ export const progressApi = {
     }),
   getSaved: (cohortId: number) =>
     api<ProgressReportResponse>(`/api/instructor/progress/report/cohort/${cohortId}`),
+  delete: (cohortId: number) =>
+    api<void>(`/api/instructor/progress/report/cohort/${cohortId}`, { method: "DELETE" }),
 };
 

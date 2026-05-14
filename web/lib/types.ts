@@ -43,6 +43,7 @@ export type SessionClaims = {
   role: Role;
   tenantId: string | null;
   exp: number;        // unix seconds
+  mustChangePassword?: boolean;
 };
 
 // ─── Tenants ──────────────────────────────────────────────────────────────
@@ -62,16 +63,21 @@ export type TenantResponse = {
 export type InstructorProvisionRequest = {
   schemaName: string;
   username: string;
-  password: string;
+  displayName: string;
+  email: string;
 };
 
 export type InstructorResponse = {
   id: number;
   username: string;
+  displayName: string | null;
+  email: string | null;
   schemaName: string;
   role: Role;
   active: boolean;
   createdAt: string;
+  /** Only present immediately after creation. */
+  tempPassword?: string;
 };
 
 // ─── Cohorts ──────────────────────────────────────────────────────────────

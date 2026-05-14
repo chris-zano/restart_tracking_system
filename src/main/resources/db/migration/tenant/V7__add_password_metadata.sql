@@ -1,0 +1,10 @@
+ALTER TABLE users
+    ADD COLUMN display_name VARCHAR(255),
+    ADD COLUMN email        VARCHAR(255);
+
+CREATE TABLE password_meta (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT      NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    state      VARCHAR(20) NOT NULL DEFAULT 'SYSTEM_GENERATED',
+    created_at TIMESTAMP   NOT NULL DEFAULT NOW()
+);

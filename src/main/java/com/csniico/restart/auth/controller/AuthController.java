@@ -5,6 +5,10 @@ import com.csniico.restart.auth.dto.LoginRequestDto;
 import com.csniico.restart.auth.dto.LoginResponseDto;
 import com.csniico.restart.auth.service.JwtService;
 import com.csniico.restart.common.response.ApiResponse;
+import com.csniico.restart.instructor.entity.PasswordMeta;
+import com.csniico.restart.instructor.entity.TenantUser;
+import com.csniico.restart.instructor.repository.PasswordMetaRepository;
+import com.csniico.restart.instructor.repository.TenantUserRepository;
 import com.csniico.restart.instructor.service.TenantUserDetailsService;
 import com.csniico.restart.multitenancy.TenantContext;
 import jakarta.annotation.PostConstruct;
@@ -20,6 +24,8 @@ import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDateTime;
+
 @RestController
 @RequestMapping("/api/auth")
 public class AuthController {
@@ -28,6 +34,8 @@ public class AuthController {
     private final TenantUserDetailsService tenantUserDetailsService;
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
+    private final TenantUserRepository tenantUserRepository;
+    private final PasswordMetaRepository passwordMetaRepository;
 
     private AuthenticationManager adminAuthManager;
     private AuthenticationManager tenantAuthManager;
@@ -35,11 +43,15 @@ public class AuthController {
     public AuthController(AdminUserDetailsService adminUserDetailsService,
                           TenantUserDetailsService tenantUserDetailsService,
                           PasswordEncoder passwordEncoder,
-                          JwtService jwtService) {
+                          JwtService jwtService,
+                          TenantUserRepository tenantUserRepository,
+                          PasswordMetaRepository passwordMetaRepository) {
         this.adminUserDetailsService = adminUserDetailsService;
         this.tenantUserDetailsService = tenantUserDetailsService;
         this.passwordEncoder = passwordEncoder;
         this.jwtService = jwtService;
+        this.tenantUserRepository = tenantUserRepository;
+        this.passwordMetaRepository = passwordMetaRepository;
     }
 
     @PostConstruct
@@ -68,7 +80,6 @@ public class AuthController {
     public ResponseEntity<ApiResponse<LoginResponseDto>> instructorLogin(
             @Valid @RequestBody LoginRequestDto request,
             HttpServletRequest httpRequest) {
-        // Read tenant directly from header (TenantFilter may not run before controller in all contexts)
         String tenantId = httpRequest.getHeader("X-Tenant-ID");
         if (tenantId == null || tenantId.isBlank()) {
             tenantId = TenantContext.getTenant();
@@ -77,18 +88,30 @@ public class AuthController {
             return ResponseEntity.badRequest()
                     .body(ApiResponse.error("X-Tenant-ID header is required"));
         }
-        // Explicitly set TenantContext so TenantUserDetailsService can resolve the correct schema
         TenantContext.setTenant(tenantId);
         try {
             Authentication auth = tenantAuthManager.authenticate(
                     new UsernamePasswordAuthenticationToken(request.getUsername(), request.getPassword()));
             String role = extractRole(auth);
-            String token = jwtService.generateToken(auth.getName(), role, tenantId);
+
+            boolean mustChange = resolveMustChangePassword(request.getUsername());
+
+            String token = jwtService.generateToken(auth.getName(), role, tenantId, mustChange);
             return ResponseEntity.ok(ApiResponse.success("Login successful",
                     new LoginResponseDto(token, role, tenantId)));
         } finally {
             TenantContext.clearTenant();
         }
+    }
+
+    private boolean resolveMustChangePassword(String username) {
+        return tenantUserRepository.findByUsername(username)
+                .flatMap(passwordMetaRepository::findByUser)
+                .map(meta -> {
+                    if (meta.getState() == PasswordMeta.State.SYSTEM_GENERATED) return true;
+                    return meta.getCreatedAt().isBefore(LocalDateTime.now().minusDays(90));
+                })
+                .orElse(false);
     }
 
     private String extractRole(Authentication auth) {
@@ -99,5 +122,3 @@ public class AuthController {
                 .replace("ROLE_", "");
     }
 }
-
-
