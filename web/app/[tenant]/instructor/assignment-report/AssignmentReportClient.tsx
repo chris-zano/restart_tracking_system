@@ -14,7 +14,7 @@ import {
 import { toast } from "sonner";
 import {
   Upload, HelpCircle, FileSpreadsheet, Mail, Loader2, CircleDot, Circle, CheckCircle2,
-  Trash2, LayoutList, Table2, Check,
+  Trash2, LayoutList, Table2, Check, Send, AlertCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { generateProgressReport, getSavedProgressReport, clearProgressReport } from "@/app/actions";
@@ -23,6 +23,7 @@ import type {
   ProgressReportResponse, WeekProgress,
 } from "@/lib/types";
 import type { RemindEmailPayload } from "@/app/api/email/remind/route";
+import type { BulkRemindPayload } from "@/app/api/email/remind-bulk/route";
 
 // ─── Analysis loader ──────────────────────────────────────────────────────────
 
@@ -475,6 +476,239 @@ function TableView({
   );
 }
 
+// ─── Bulk email dialog ────────────────────────────────────────────────────────
+
+type SendState =
+  | { phase: "idle" }
+  | { phase: "sending"; current: number; total: number; failed: string[] }
+  | { phase: "done"; sent: number; failed: string[] };
+
+function BulkEmailDialog({
+  open,
+  onClose,
+  report,
+  allLearners,
+}: {
+  open: boolean;
+  onClose: () => void;
+  report: ProgressReportResponse;
+  allLearners: LearnerResponse[];
+}) {
+  const weeks = report.learners[0]?.weeks ?? [];
+  const [selectedWeek, setSelectedWeek] = useState<string | null>(null);
+  const [sendState, setSendState] = useState<SendState>({ phase: "idle" });
+
+  const weekIndex = selectedWeek ? weeks.findIndex(w => w.weekNumber === selectedWeek) : -1;
+  const weeksUpTo = weekIndex >= 0 ? weeks.slice(0, weekIndex + 1) : [];
+
+  const recipients = weeksUpTo.length > 0
+    ? report.learners.map(learner => {
+        const dbLearner = learner.learnerId ? allLearners.find(l => l.id === learner.learnerId) : null;
+        const email = dbLearner?.email ?? null;
+        const name = learner.learnerDbName ?? learner.gradebookName;
+
+        const weekData = weeksUpTo.map(w => {
+          const wd = learner.weeks.find(lw => lw.weekNumber === w.weekNumber);
+          if (!wd) return null;
+          const allItems = [...wd.knowledgeChecks, ...wd.labs];
+          const total = wd.labsTotal + wd.kcTotal;
+          const done = wd.labsCompleted + wd.kcCompleted;
+          return {
+            weekLabel: w.weekNumber.replace("_", " "),
+            complete: total > 0 && done === total,
+            incomplete: allItems.filter(i => !i.completed).map(i => i.title),
+          };
+        }).filter(Boolean) as BulkRemindPayload["weeks"];
+
+        const hasIncomplete = weekData.some(w => !w.complete);
+        return { name, email, weekData, hasIncomplete };
+      })
+    : [];
+
+  const willSend = recipients.filter(r => r.hasIncomplete && r.email);
+  const noEmail = recipients.filter(r => r.hasIncomplete && !r.email);
+
+  const handleSend = async () => {
+    if (!selectedWeek || willSend.length === 0) return;
+    const upToWeekLabel = selectedWeek.replace("_", " ");
+    setSendState({ phase: "sending", current: 0, total: willSend.length, failed: [] });
+
+    const failed: string[] = [];
+    for (let i = 0; i < willSend.length; i++) {
+      const r = willSend[i];
+      const payload: BulkRemindPayload = {
+        learnerName: r.name,
+        learnerEmail: r.email!,
+        cohortName: report.cohortName,
+        upToWeekLabel,
+        weeks: r.weekData,
+      };
+      try {
+        const res = await fetch("/api/email/remind-bulk", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) failed.push(r.name);
+      } catch {
+        failed.push(r.name);
+      }
+      setSendState({ phase: "sending", current: i + 1, total: willSend.length, failed });
+    }
+
+    setSendState({ phase: "done", sent: willSend.length - failed.length, failed });
+  };
+
+  const handleClose = () => {
+    setSelectedWeek(null);
+    setSendState({ phase: "idle" });
+    onClose();
+  };
+
+  const isSending = sendState.phase === "sending";
+  const isDone = sendState.phase === "done";
+
+  return (
+    <Dialog open={open} onOpenChange={open => { if (!open) handleClose(); }}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Send progress reminders</DialogTitle>
+          <DialogDescription>
+            Send one email per learner summarising all incomplete items up to the selected week.
+          </DialogDescription>
+        </DialogHeader>
+
+        {isDone ? (
+          <div className="space-y-4 py-2">
+            <div className="flex items-start gap-3 rounded-md bg-emerald-50 border border-emerald-200 px-4 py-3">
+              <Check className="h-4 w-4 text-emerald-600 mt-0.5 shrink-0" />
+              <p className="text-sm text-emerald-700 font-medium">
+                {sendState.sent} email{sendState.sent !== 1 ? "s" : ""} sent successfully.
+              </p>
+            </div>
+            {sendState.failed.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-start gap-3 rounded-md bg-red-50 border border-red-200 px-4 py-3">
+                  <AlertCircle className="h-4 w-4 text-red-600 mt-0.5 shrink-0" />
+                  <p className="text-sm text-red-700">
+                    {sendState.failed.length} failed to send:
+                  </p>
+                </div>
+                <ul className="text-xs text-muted-foreground pl-2 space-y-0.5">
+                  {sendState.failed.map(n => <li key={n}>· {n}</li>)}
+                </ul>
+              </div>
+            )}
+          </div>
+        ) : isSending ? (
+          <div className="space-y-4 py-4">
+            <div className="flex items-center gap-3">
+              <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
+              <p className="text-sm font-medium">
+                Sending {sendState.current} of {sendState.total}…
+              </p>
+            </div>
+            <div className="h-2 w-full rounded-full bg-secondary overflow-hidden">
+              <div
+                className="h-full bg-primary rounded-full transition-all duration-300"
+                style={{ width: `${(sendState.current / sendState.total) * 100}%` }}
+              />
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4 py-1">
+            {/* Week selector */}
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">Send for weeks up to</p>
+              <div className="flex flex-wrap gap-1.5">
+                {weeks.map(w => {
+                  const active = selectedWeek === w.weekNumber;
+                  return (
+                    <button
+                      key={w.weekNumber}
+                      onClick={() => setSelectedWeek(w.weekNumber)}
+                      className={cn(
+                        "h-7 px-3 text-xs rounded-md border font-medium transition-colors",
+                        active
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "bg-background border-border text-muted-foreground hover:bg-accent",
+                      )}
+                    >
+                      {w.weekNumber.replace("_", " ")}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Preview */}
+            {selectedWeek && (
+              <div className="rounded-md border bg-muted/30 divide-y divide-border text-sm">
+                <div className="px-4 py-2.5 flex items-center justify-between">
+                  <span className="text-muted-foreground">Will receive email</span>
+                  <span className="font-semibold tabular-nums">{willSend.length}</span>
+                </div>
+                {noEmail.length > 0 && (
+                  <div className="px-4 py-2.5 flex items-center justify-between text-amber-700">
+                    <span>Skipped — no email on record</span>
+                    <span className="font-semibold tabular-nums">{noEmail.length}</span>
+                  </div>
+                )}
+                <div className="px-4 py-2.5 flex items-center justify-between text-muted-foreground">
+                  <span>Already complete (no email needed)</span>
+                  <span className="font-semibold tabular-nums">
+                    {recipients.length - recipients.filter(r => r.hasIncomplete).length}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Learner list */}
+            {willSend.length > 0 && (
+              <div className="max-h-36 overflow-y-auto rounded-md border text-xs divide-y divide-border">
+                {willSend.map(r => (
+                  <div key={r.name} className="px-3 py-1.5 flex items-center justify-between">
+                    <span>{r.name}</span>
+                    <span className="text-muted-foreground">{r.email}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {selectedWeek && willSend.length === 0 && (
+              <p className="text-sm text-muted-foreground text-center py-2">
+                All learners have completed everything up to {selectedWeek.replace("_", " ")}.
+              </p>
+            )}
+          </div>
+        )}
+
+        <DialogFooter>
+          {isDone ? (
+            <Button onClick={handleClose}>Close</Button>
+          ) : (
+            <>
+              <Button variant="outline" onClick={handleClose} disabled={isSending}>
+                Cancel
+              </Button>
+              {!isSending && (
+                <Button
+                  onClick={handleSend}
+                  disabled={!selectedWeek || willSend.length === 0}
+                  className="gap-2"
+                >
+                  <Send className="h-4 w-4" />
+                  Send {willSend.length > 0 ? `${willSend.length} email${willSend.length !== 1 ? "s" : ""}` : "emails"}
+                </Button>
+              )}
+            </>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ─── Accordion (list) view ────────────────────────────────────────────────────
 
 function ListView({
@@ -561,6 +795,7 @@ export function AssignmentReportClient({
   const [analyzing, setAnalyzing] = useState(false);
   const [showUploadDialog, setShowUploadDialog] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [showBulkEmail, setShowBulkEmail] = useState(false);
   const [csvPreview, setCsvPreview] = useState<CsvPreview | null>(null);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [confirming, startConfirm] = useTransition();
@@ -707,16 +942,28 @@ export function AssignmentReportClient({
             </p>
           )}
           {report && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="gap-2 text-destructive hover:text-destructive"
-              onClick={() => setShowClearConfirm(true)}
-              disabled={analyzing || loadingSaved || clearing}
-            >
-              <Trash2 className="h-4 w-4" />
-              Clear Gradebook
-            </Button>
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                className="gap-2"
+                onClick={() => setShowBulkEmail(true)}
+                disabled={analyzing || loadingSaved}
+              >
+                <Send className="h-4 w-4" />
+                Send Emails to Learners
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="gap-2 text-destructive hover:text-destructive"
+                onClick={() => setShowClearConfirm(true)}
+                disabled={analyzing || loadingSaved || clearing}
+              >
+                <Trash2 className="h-4 w-4" />
+                Clear Gradebook
+              </Button>
+            </>
           )}
           <Button
             size="sm"
@@ -779,6 +1026,16 @@ export function AssignmentReportClient({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* ── Bulk email dialog ── */}
+      {report && (
+        <BulkEmailDialog
+          open={showBulkEmail}
+          onClose={() => setShowBulkEmail(false)}
+          report={report}
+          allLearners={allLearners}
+        />
+      )}
 
       {/* ── CSV preview dialog ── */}
       <CsvPreviewDialog

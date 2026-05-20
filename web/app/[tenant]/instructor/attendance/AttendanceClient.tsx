@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Download } from "lucide-react";
 import { toast } from "sonner";
 import {
   recordAttendance, getAttendanceByCohort,
@@ -180,6 +181,28 @@ export function AttendanceClient({
   });
 
   const pct = (min: number) => duration > 0 ? Math.round((min / duration) * 100) : 0;
+
+  const downloadAttendanceCsv = (session: AttendanceResponse) => {
+    const rows: string[] = [
+      `Date,${session.sessionDate}`,
+      `Duration (min),${session.duration}`,
+      "",
+      "Name,Email,Duration (min)",
+    ];
+    for (const p of session.participants) {
+      const learner = cohortLearners.find(l => l.id === p.learnerId);
+      const name  = learner?.fullname ?? `Learner ${p.learnerId}`;
+      const email = learner?.email ?? "";
+      rows.push(`"${name}","${email}",${p.duration}`);
+    }
+    const blob = new Blob([rows.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    a.download = `attendance-${session.sessionDate}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const mq = matchQuery.toLowerCase();
   const visibleMatched = mq
@@ -551,7 +574,8 @@ export function AttendanceClient({
                         <th className="text-right pr-4">Duration</th>
                         <th className="text-right pr-4">Present</th>
                         <th className="text-right pr-4">Absent</th>
-                        <th className="text-right">Avg duration</th>
+                        <th className="text-right pr-4">Avg duration</th>
+                        <th className="w-10"></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -570,8 +594,19 @@ export function AttendanceClient({
                             <td className="text-right pr-4 tabular-nums">
                               <span className={s.absent > 0 ? "text-destructive font-medium" : "text-muted-foreground"}>{s.absent}</span>
                             </td>
-                            <td className="text-right tabular-nums text-muted-foreground">
+                            <td className="text-right pr-4 tabular-nums text-muted-foreground">
                               {s.avgDur > 0 ? `${s.avgDur} min` : "—"}
+                            </td>
+                            <td className="text-right">
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+                                title="Download CSV"
+                                onClick={() => downloadAttendanceCsv(s)}
+                              >
+                                <Download className="h-3.5 w-3.5" />
+                              </Button>
                             </td>
                           </tr>
                         ))}
